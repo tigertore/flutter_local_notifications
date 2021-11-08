@@ -36,7 +36,7 @@ public class ScheduledNotificationReceiver extends BroadcastReceiver {
             notificationManager.notify(notificationId, notification);
             boolean repeat = intent.getBooleanExtra("repeat", false);
             if (!repeat) {
-                FlutterLocalNotificationsPlugin.removeNotificationFromCache(context, notificationId);
+                FlutterLocalNotificationsPlugin.removeNotificationFromCache(context, notificationId, null);
             }
         } else {
             Gson gson = FlutterLocalNotificationsPlugin.buildGson();
@@ -51,7 +51,7 @@ public class ScheduledNotificationReceiver extends BroadcastReceiver {
             } else if (notificationDetails.repeatInterval != null) {
                 FlutterLocalNotificationsPlugin.scheduleNextRepeatingNotification(context, notificationDetails);
             } else {
-                FlutterLocalNotificationsPlugin.removeNotificationFromCache(context, notificationDetails.id);
+                FlutterLocalNotificationsPlugin.removeNotificationFromCache(context, notificationDetails.id, null);
             }
         }
 

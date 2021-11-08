@@ -19,6 +19,8 @@ import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Build.VERSION;
 import android.os.Build.VERSION_CODES;
+import android.os.Handler;
+import android.os.Looper;
 import android.service.notification.StatusBarNotification;
 import android.text.Html;
 import android.text.Spanned;
@@ -70,6 +72,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import io.flutter.FlutterInjector;
 import io.flutter.embedding.engine.loader.FlutterLoader;
@@ -130,10 +136,20 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
     private static final String CANCEL_TAG = "tag";
     static String NOTIFICATION_DETAILS = "notificationDetails";
     static Gson gson;
+    static ExecutorService executor;
+    static Handler handler;
+    static SharedPreferences sharedPreferences;
     private MethodChannel channel;
     private Context applicationContext;
     private Activity mainActivity;
     private Intent launchIntent;
+
+    public FlutterLocalNotificationsPlugin() {
+        executor =
+                new ThreadPoolExecutor(0, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
+        handler = new Handler(Looper.getMainLooper());
+    }
+
 
     @SuppressWarnings("deprecation")
     public static void registerWith(io.flutter.plugin.common.PluginRegistry.Registrar registrar) {
@@ -149,12 +165,12 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         for (NotificationDetails scheduledNotification : scheduledNotifications) {
             if (scheduledNotification.repeatInterval == null) {
                 if (scheduledNotification.timeZoneName == null) {
-                    scheduleNotification(context, scheduledNotification, false);
+                    scheduleNotification(context, scheduledNotification, false, null);
                 } else {
-                    zonedScheduleNotification(context, scheduledNotification, false);
+                    zonedScheduleNotification(context, scheduledNotification, false, null);
                 }
             } else {
-                repeatNotification(context, scheduledNotification, false);
+                repeatNotification(context, scheduledNotification, false, null);
             }
         }
     }
@@ -167,7 +183,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
 
     protected static Notification createNotification(Context context, NotificationDetails notificationDetails) {
         NotificationChannelDetails notificationChannelDetails = NotificationChannelDetails.fromNotificationDetails(notificationDetails);
-        if(canCreateNotificationChannel(context, notificationChannelDetails)) {
+        if (canCreateNotificationChannel(context, notificationChannelDetails)) {
             setupNotificationChannel(context, notificationChannelDetails);
         }
         Intent intent = getLaunchIntent(context);
@@ -294,31 +310,36 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         return scheduledNotifications;
     }
 
-    private static void saveScheduledNotifications(Context context, ArrayList<NotificationDetails> scheduledNotifications) {
+    private static void saveScheduledNotifications(Context context, ArrayList<NotificationDetails> scheduledNotifications, Result result) {
         Gson gson = buildGson();
         String json = gson.toJson(scheduledNotifications);
         SharedPreferences sharedPreferences = context.getSharedPreferences(SCHEDULED_NOTIFICATIONS, Context.MODE_PRIVATE);
         SharedPreferences.Editor editor = sharedPreferences.edit();
         editor.putString(SCHEDULED_NOTIFICATIONS, json);
-        tryCommittingInBackground(editor, 3);
+        commitAsync(editor, result);
     }
 
-    private static void tryCommittingInBackground(final SharedPreferences.Editor editor, final int tries) {
-        if (tries == 0) {
-            return;
-        }
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final boolean isCommitted = editor.commit();
-                if (!isCommitted) {
-                    tryCommittingInBackground(editor, tries - 1);
-                }
-            }
-        }).start();
+    private static void commitAsync(final SharedPreferences.Editor editor, final Result result) {
+        executor.execute(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        editor.commit();
+                        if (result == null) {
+                            return;
+                        }
+                        handler.post(
+                                new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        result.success(null);
+                                    }
+                                });
+                    }
+                });
     }
 
-    static void removeNotificationFromCache(Context context, Integer notificationId) {
+    static void removeNotificationFromCache(Context context, Integer notificationId, Result result) {
         ArrayList<NotificationDetails> scheduledNotifications = loadScheduledNotifications(context);
         for (Iterator<NotificationDetails> it = scheduledNotifications.iterator(); it.hasNext(); ) {
             NotificationDetails notificationDetails = it.next();
@@ -327,7 +348,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
                 break;
             }
         }
-        saveScheduledNotifications(context, scheduledNotifications);
+        saveScheduledNotifications(context, scheduledNotifications, result);
     }
 
     @SuppressWarnings("deprecation")
@@ -342,7 +363,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         }
     }
 
-    private static void scheduleNotification(Context context, final NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache) {
+    private static void scheduleNotification(Context context, final NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache, Result result) {
         Gson gson = buildGson();
         String notificationDetailsJson = gson.toJson(notificationDetails);
         Intent notificationIntent = new Intent(context, ScheduledNotificationReceiver.class);
@@ -357,11 +378,11 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         }
 
         if (updateScheduledNotificationsCache) {
-            saveScheduledNotification(context, notificationDetails);
+            saveScheduledNotification(context, notificationDetails, result);
         }
     }
 
-    private static void zonedScheduleNotification(Context context, final NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache) {
+    private static void zonedScheduleNotification(Context context, final NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache, Result result) {
         Gson gson = buildGson();
         String notificationDetailsJson = gson.toJson(notificationDetails);
         Intent notificationIntent = new Intent(context, ScheduledNotificationReceiver.class);
@@ -376,7 +397,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         }
 
         if (updateScheduledNotificationsCache) {
-            saveScheduledNotification(context, notificationDetails);
+            saveScheduledNotification(context, notificationDetails, result);
         }
     }
 
@@ -390,7 +411,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         PendingIntent pendingIntent = getBroadcastPendingIntent(context, notificationDetails.id, notificationIntent);
         AlarmManager alarmManager = getAlarmManager(context);
         AlarmManagerCompat.setExactAndAllowWhileIdle(alarmManager, AlarmManager.RTC_WAKEUP, notificationTriggerTime, pendingIntent);
-        saveScheduledNotification(context, notificationDetails);
+        saveScheduledNotification(context, notificationDetails, null);
     }
 
     private static PendingIntent getActivityPendingIntent(Context context, int id, Intent intent) {
@@ -409,7 +430,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         return PendingIntent.getBroadcast(context, id, intent, flags);
     }
 
-    private static void repeatNotification(Context context, NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache) {
+    private static void repeatNotification(Context context, NotificationDetails notificationDetails, Boolean updateScheduledNotificationsCache, Result result) {
         long repeatInterval = calculateRepeatIntervalMilliseconds(notificationDetails);
 
         long notificationTriggerTime = notificationDetails.calledAt;
@@ -441,7 +462,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP, notificationTriggerTime, repeatInterval, pendingIntent);
         }
         if (updateScheduledNotificationsCache) {
-            saveScheduledNotification(context, notificationDetails);
+            saveScheduledNotification(context, notificationDetails, result);
         }
     }
 
@@ -475,7 +496,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         return repeatInterval;
     }
 
-    private static void saveScheduledNotification(Context context, NotificationDetails notificationDetails) {
+    private static void saveScheduledNotification(Context context, NotificationDetails notificationDetails, Result result) {
         ArrayList<NotificationDetails> scheduledNotifications = loadScheduledNotifications(context);
         ArrayList<NotificationDetails> scheduledNotificationsToSave = new ArrayList<>();
         for (NotificationDetails scheduledNotification : scheduledNotifications) {
@@ -485,7 +506,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             scheduledNotificationsToSave.add(scheduledNotification);
         }
         scheduledNotificationsToSave.add(notificationDetails);
-        saveScheduledNotifications(context, scheduledNotificationsToSave);
+        saveScheduledNotifications(context, scheduledNotificationsToSave, result);
     }
 
     private static int getDrawableResourceId(Context context, String name) {
@@ -861,7 +882,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             return;
         }
         notificationDetails.scheduledDateTime = nextFireDate;
-        zonedScheduleNotification(context, notificationDetails, true);
+        zonedScheduleNotification(context, notificationDetails, true, null);
     }
 
     static void zonedScheduleNextNotificationMatchingDateComponents(Context context, NotificationDetails notificationDetails) {
@@ -871,7 +892,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             return;
         }
         notificationDetails.scheduledDateTime = nextFireDate;
-        zonedScheduleNotification(context, notificationDetails, true);
+        zonedScheduleNotification(context, notificationDetails, true, null);
     }
 
     static String getNextFireDate(NotificationDetails notificationDetails) {
@@ -994,6 +1015,8 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
 
     @Override
     public void onDetachedFromActivityForConfigChanges() {
+        handler.removeCallbacksAndMessages(null);
+        executor.shutdown();
         this.mainActivity = null;
     }
 
@@ -1095,16 +1118,14 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         Map<String, Object> arguments = call.arguments();
         Integer id = (Integer) arguments.get(CANCEL_ID);
         String tag = (String) arguments.get(CANCEL_TAG);
-        cancelNotification(id, tag);
-        result.success(null);
+        cancelNotification(id, tag, result);
     }
 
     private void repeat(MethodCall call, Result result) {
         Map<String, Object> arguments = call.arguments();
         NotificationDetails notificationDetails = extractNotificationDetails(result, arguments);
         if (notificationDetails != null) {
-            repeatNotification(applicationContext, notificationDetails, true);
-            result.success(null);
+            repeatNotification(applicationContext, notificationDetails, true, result);
         }
     }
 
@@ -1112,8 +1133,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         Map<String, Object> arguments = call.arguments();
         NotificationDetails notificationDetails = extractNotificationDetails(result, arguments);
         if (notificationDetails != null) {
-            scheduleNotification(applicationContext, notificationDetails, true);
-            result.success(null);
+            scheduleNotification(applicationContext, notificationDetails, true, result);
         }
     }
 
@@ -1124,8 +1144,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             if (notificationDetails.matchDateTimeComponents != null) {
                 notificationDetails.scheduledDateTime = getNextFireDateMatchingDateTimeComponents(notificationDetails);
             }
-            zonedScheduleNotification(applicationContext, notificationDetails, true);
-            result.success(null);
+            zonedScheduleNotification(applicationContext, notificationDetails, true, result);
         }
     }
 
@@ -1162,8 +1181,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         SharedPreferences sharedPreferences = applicationContext.getSharedPreferences(SHARED_PREFERENCES_KEY, Context.MODE_PRIVATE);
         SharedPreferences.Editor editor = sharedPreferences.edit();
         editor.putString(DEFAULT_ICON, defaultIcon);
-        tryCommittingInBackground(editor, 3);
-        result.success(true);
+        commitAsync(editor, result);
     }
 
     /// Extracts the details of the notifications passed from the Flutter side and also validates that some of the details (especially resources) passed are valid
@@ -1234,7 +1252,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         return !StringUtils.isNullOrEmpty(icon) && !isValidDrawableResource(applicationContext, icon, result, INVALID_ICON_ERROR_CODE);
     }
 
-    private void cancelNotification(Integer id, String tag) {
+    private void cancelNotification(Integer id, String tag, Result result) {
         Intent intent = new Intent(applicationContext, ScheduledNotificationReceiver.class);
         PendingIntent pendingIntent = getBroadcastPendingIntent(applicationContext, id, intent);
         AlarmManager alarmManager = getAlarmManager(applicationContext);
@@ -1245,7 +1263,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
         } else {
             notificationManager.cancel(tag, id);
         }
-        removeNotificationFromCache(applicationContext, id);
+        removeNotificationFromCache(applicationContext, id, result);
     }
 
     private void cancelAllNotifications(Result result) {
@@ -1265,7 +1283,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
             alarmManager.cancel(pendingIntent);
         }
 
-        saveScheduledNotifications(applicationContext, new ArrayList<NotificationDetails>());
+        saveScheduledNotifications(applicationContext, new ArrayList<NotificationDetails>(), result);
         result.success(null);
     }
 
@@ -1389,7 +1407,7 @@ public class FlutterLocalNotificationsPlugin implements MethodCallHandler, Plugi
                     String[] splitUri = soundUri.toString().split("/");
                     String resource = splitUri[splitUri.length - 1];
                     Integer resourceId = tryParseInt(resource);
-                    if(resourceId == null) {
+                    if (resourceId == null) {
                         channelPayload.put("soundSource", soundSources.indexOf(SoundSource.RawResource));
                         channelPayload.put("sound", resource);
                     } else {
